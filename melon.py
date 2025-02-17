@@ -214,6 +214,7 @@ class Worker(QThread): # 브라우저 돌아가는 스레드
         # 이것을 가우시안 분포를 통해서 몇 초 전부터 응답을 보낼지 값을 만들어 낸다.
         optimized_time = get_optimizatized_time(target_time)
         np.random.seed(42)  # 재현성을 위해 시드 설정
+        optimized_time = 500
         time_offsets = np.random.normal(loc=0, scale=optimized_time / 2, size=REQUESTS_CNT)
         optimized_time_offsets = optimized_time + time_offsets
         optimized_time_offsets[::-1].sort()
@@ -247,17 +248,22 @@ class Worker(QThread): # 브라우저 돌아가는 스레드
                     print('이미 key가 있습니다. 바로 real key를 받습니다.')
                     response = self.get_real_key(self.nflActId)
                     response_script = response.text
+                    print(response_script)
                     real_key_list.append(response_script)
                     return
 
 
 
         for time_offset in optimized_time_offsets:
-            print(f"target time : {target_time}")
+            print(f"target time : {time_offset}")
             thread = threading.Thread(target=get_key, args=(target_time, time_offset,))
+            self.threads.append(thread)
             thread.start()
             self.printLog.emit(f'{time_offset}의 스레드가 실행되었습니다.')
-            self.threads.append(thread)
+
+        for thread in self.threads:
+            thread.join()
+
 
         if not self.running:
             self.printLog.emit('대기 중 사용자가 프로그램을 종료했습니다.')
