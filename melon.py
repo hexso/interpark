@@ -15,8 +15,13 @@ import sys
 import requests
 import threading
 import random
+import numpy as np
 
-TIMESLEEP = 0.05
+TIMESLEEP = 0.01
+SCHEDULE_NO = '100001'
+START_TIME_MILLI = 1000
+REQUESTS_CNT = 10
+key_list = []
 
 driver = None
 
@@ -28,7 +33,8 @@ headers = {
 class Worker(QThread): # 브라우저 돌아가는 스레드
     printLog = pyqtSignal(str)
     taskDone = pyqtSignal()
-    def __init__(self, parent, id, pw, ticket_id, scheduleNo='10001'):
+    update_signal = pyqtSignal(list)
+    def __init__(self, parent, id, pw, ticket_id, scheduleNo='100001'):
         super().__init__(parent)
         self.running = True
         self.parent = parent
@@ -43,6 +49,7 @@ class Worker(QThread): # 브라우저 돌아가는 스레드
         self.tempkey = None
         self.nflActId = None
         self.real_key = None
+        self.session = None
 
     # 1. 아마 아이디마다 고유의 멤버키가 있을것으로 예상된다. 이것을 먼저 받아야 한다.
     def get_memberkey(self):
@@ -58,6 +65,11 @@ class Worker(QThread): # 브라우저 돌아가는 스레드
             "requestservicetype": "P"
         }
 
+        # User-Agent와 같은 헤더 설정
+        headers = {
+            "User-Agent": self.driver.execute_script("return navigator.userAgent;")  # 현재 브라우저의 User-Agent 가져오기
+        }
+
         # `requests.Session()` 초기화
         session = requests.Session()
 
@@ -65,17 +77,34 @@ class Worker(QThread): # 브라우저 돌아가는 스레드
         for cookie in self.driver.get_cookies():
             session.cookies.set(cookie['name'], cookie['value'])
 
-        # User-Agent와 같은 헤더 설정
-        headers = {
-            "User-Agent": self.driver.execute_script("return navigator.userAgent;")  # 현재 브라우저의 User-Agent 가져오기
-        }
-
         response = session.get(url, headers=headers, params=params)
         member_key = response.json()['data']['memberKey']
         self.member_key = member_key
         return member_key
 
-    #2. 일시적으로 생성되는 key 두개를 받는다. nflActId,key
+    #2. auth
+    def do_auth(self):
+        headers = {
+            "User-Agent": self.driver.execute_script("return navigator.userAgent;")  # 현재 브라우저의 User-Agent 가져오기
+        }
+        url = f"https://tktapi.melon.com/api/v1/authorization/melon-member/identity-verification.json"
+        params = {
+            "memberKey": self.member_key,
+            "ticketViewType": "minors",
+            "requestservicetype": "P"
+        }
+
+        # `requests.Session()` 초기화
+        session = requests.Session()
+
+        # Selenium에서 쿠키 가져오기
+        for cookie in self.driver.get_cookies():
+            session.cookies.set(cookie['name'], cookie['value'])
+
+        response = session.get(url, headers=headers, params=params)
+        return response
+
+    #3. 일시적으로 생성되는 key 두개를 받는다. nflActId,key
     def get_temp_keys(self):
         headers = {
             "User-Agent": self.driver.execute_script("return navigator.userAgent;")  # 현재 브라우저의 User-Agent 가져오기
@@ -88,87 +117,41 @@ class Worker(QThread): # 브라우저 돌아가는 스레드
             "requestservicetype": "P"
         }
 
-        # `requests.Session()` 초기화
-        session = requests.Session()
-        # Selenium에서 쿠키 가져오기
-        for cookie in self.driver.get_cookies():
-            session.cookies.set(cookie['name'], cookie['value'])
-
-        response = session.get(url, headers=headers, params=params)
+        response = self.session.get(url, headers=headers, params=params)
         return response
 
-    # 3. nflActId,key들을 통해 실제 접속을 위한 key를 받는다
-    def get_real_key(self):
+    # 4. nflActId,key들을 통해 실제 접속을 위한 key를 받는다
+    def get_real_key(self, nflActid):
         headers = {
             "User-Agent": self.driver.execute_script("return navigator.userAgent;")  # 현재 브라우저의 User-Agent 가져오기
         }
-        url = f"https://tktapi.melon.com/api/product/prodKey.json"
+        url = f"https://zam.melon.com/ts.wseq"
         params = {
-            "prodId": self.ticket_id,
-            "scheduleNo": self.scheduleNo,
-            "v": "1",
-            "requestservicetype": "P"
+            'opcode': '5101',
+            'nfid': '0',
+            'prefix': 'NetFunnel.gRtype=5101;',
+            'sid': 'service_1',
+            'aid': nflActid,
+            'js': 'yes',
+            'user_data': self.member_key,
+            '1731322891240': ''
         }
 
-        # `requests.Session()` 초기화
-        session = requests.Session()
-        # Selenium에서 쿠키 가져오기
-        for cookie in self.driver.get_cookies():
-            session.cookies.set(cookie['name'], cookie['value'])
+        response = self.session.get(url, headers=headers, params=params)
+        return response
 
-        response = session.get(url, headers=headers, params=params)
-        self.tempkey = response['key']
-        sentence = response['nflActId']
-        match = re.search(r"key=([^&]*)", sentence)
-        if match:
-            key_value = match.group(1) + '&'
-            print(key_value)
-        self.real_key = key_value
-
-    #4. 새로운 페이지 들어가기
-    def enter_ticket_page(self):
-        # 예약 정보 작성
-        self.driver.execute_script("window.open('');")
-        tabs = self.driver.window_handles
-        self.driver.switch_to.window(tabs[1])
-
-        data = {
-            'prodId': self.ticket_id,
-            'pocCode': 'SC0002',
-            'scheduleNo': '100001',
-            'sellCondNo': '1',
-            'sellTypeCode': 'ST0002',
-            't': '',
-            'tYn': 'Y',
-            'chk': self.tempkey,
-            'netfunnel_key': self.nflActId,
-            'autheTypeCode': 'BG0010'
-        }
-
-        # JavaScript를 사용해 폼 데이터 제출하기
-        script = f"""
-            var form = document.createElement('form');
-            form.method = 'POST';
-            form.action = 'https://ticket.melon.com/reservation/popup/onestop.htm';
-            form.style.display = 'none';
-
-            var params = {data};
-            for (var key in params) {{
-                if (params.hasOwnProperty(key)) {{
-                    var input = document.createElement('input');
-                    input.type = 'hidden';
-                    input.name = key;
-                    input.value = params[key];
-                    form.appendChild(input);
-                }}
-            }}
-
-            document.body.appendChild(form);
-            form.submit();
-        """
-
+    #5. 새로운 페이지 들어가기
+    def enter_ticket_page(self, response_script):
         # Selenium을 사용하여 JavaScript 실행
-        self.driver.execute_script(script)
+        self.driver.refresh()
+        time.sleep(2)
+        button = self.driver.find_element(By.XPATH, "//dd[@class='cont_process']//button")
+        button.click()
+        time.sleep(1)
+        button2 = self.driver.find_element(By.XPATH, "//*[@id='ticketReservation_Btn']")
+        button2.click()
+        time.sleep(0.5)
+        self.driver.execute_script(response_script)
 
     def run(self):
         global driver
@@ -177,9 +160,10 @@ class Worker(QThread): # 브라우저 돌아가는 스레드
             return
 
         self.driver = driver
+        self.update_signal.emit(['1','3'])
         #멤버키를 먼저 받는다.
         self.get_memberkey()
-
+        self.do_auth()
         # 부모의 예약 시작 시간 불러오기
         target_time = self.parent.timeEdit.time().toPyTime()
 
@@ -188,41 +172,90 @@ class Worker(QThread): # 브라우저 돌아가는 스레드
 
         self.printLog.emit("예약 시작 시간까지 대기합니다..")
 
-        # 예약 시작 시간 8초 전까지 대기
+        # 예약 시작 시간 5초 전까지 대기
         while now < datetime.datetime(now.year, now.month, now.day, target_time.hour, target_time.minute,
-                                      target_time.second) - datetime.timedelta(seconds=2):
-            time.sleep(0.05)
+                                      target_time.second) - datetime.timedelta(seconds=5):
+            time.sleep(0.01)
             now = datetime.datetime.now()  # 현재 시간을 다시 업데이트
 
         self.printLog.emit("자 들어갑니다")
 
         self.threads = []
         thread_count = self.parent.sb_thread_count.value()
-        def wait_list():
-            while True:
-                if not self.parent.running:
-                    return
-                if self.tempkey != None:
-                    return
-                thread_response = self.get_temp_keys()
-                if 'key' in thread_response:
-                    if thread_response['key'] != '':
-                        self.tempkey = thread_response['key']
-                        self.nflActId = thread_response['nflActId']
-                        return
-                time.sleep(TIMESLEEP)
 
-        for i in range(thread_count):
-            thread = threading.Thread(target=wait_list)
+        # `requests.Session()` 초기화
+        session = requests.Session()
+
+        # Selenium에서 쿠키 가져오기
+        for cookie in self.driver.get_cookies():
+            session.cookies.set(cookie['name'], cookie['value'])
+        self.session = session
+
+        #응답시간을 체크하여 최적화된 시간을 계산한다.
+        #이 때는 표준편차를 이용
+        def get_optimizatized_time():
+            adjustment_factor = 1.1  # 변동성 보정을 위한 계수
+            latency_samples = []  # 응답 시간(ms) 저장 리스트
+            while datetime.datetime.now() < target_time - datetime.timedelta(milliseconds=START_TIME_MILLI):
+                response = self.get_temp_keys()
+                elapsed_ms = response.elapsed.total_seconds() * 1000  # 밀리초(ms) 변환
+                latency_samples.append(elapsed_ms)
+                print(f"[{datetime.datetime.now()}] 응답 시간: {elapsed_ms:.2f} ms")
+
+                time.sleep(0.2)  # 200ms 간격으로 요청 (부하를 피하기 위해)
+            latency_mean = np.mean(latency_samples)
+            latency_std = np.std(latency_samples)  # 표준편차 계산
+            predicted_latency = latency_mean + adjustment_factor * latency_std  # 변동성을 고려한 예측값
+            return predicted_latency
+
+        # 얻어낸 최적화된 응답시간을 바탕으로 총 REQUESTS_CNT 만큼의 요청을 할 예정.
+        # 이것을 가우시안 분포를 통해서 몇 초 전부터 응답을 보낼지 값을 만들어 낸다.
+        optimized_time = get_optimizatized_time()
+        np.random.seed(42)  # 재현성을 위해 시드 설정
+        time_offsets = np.random.normal(loc=0, scale=optimized_time / 2, size=REQUESTS_CNT)
+        optimized_time_offsets = optimized_time + time_offsets
+        optimized_time_offsets[::-1].sort()
+
+        real_key_list = []
+        def get_key(time_offset):
+            '''
+            time_offset: 목표시간 대비
+            :return:
+            '''
+            print("in Thread")
+            target_time = datetime.datetime.now().replace(hour=15, minute=0, second=0, microsecond=0)
+            send_time = target_time - datetime.timedelta(milliseconds=time_offset)
+
+            while datetime.datetime.now() < send_time:
+                time.sleep(0.001)
+            thread_response = self.get_temp_keys()
+            thread_response = thread_response.json()
+            if 'key' in thread_response:
+                if thread_response['key'] != '':
+                    nflActId = thread_response['nflActId']
+                    response = self.get_real_key(nflActId)
+                    response_script = response.text
+                    real_key_list.append(response_script)
+
+        for time_offset in optimized_time_offsets:
+            thread = threading.Thread(target=get_key, args=time_offset)
             thread.start()
-            self.printLog.emit(f'{i+1}번째 스레드가 실행되었습니다.')
+            self.printLog.emit(f'{time_offset}의 스레드가 실행되었습니다.')
             self.threads.append(thread)
 
-        self.get_real_key()
-        self.enter_ticket_page()
-        self.printLog.emit('예매 대기열을 불러왔습니다.')
+        if not self.running:
+            self.printLog.emit('대기 중 사용자가 프로그램을 종료했습니다.')
+            self.taskDone.emit()
+            return
 
 
+        print(f"키를 얻었습니다")
+        for key in real_key_list:
+            print(key)
+
+        self.printLog.emit('수행을 완료하였습니다.')
+
+        self.up
 
 
 
@@ -438,6 +471,37 @@ class Form(QWidget):
 
         self.vbox.addWidget(self.gb_control)
 
+        # 동적으로 리스트를 표시할 그룹박스
+        self.gb_dynamic_list = QGroupBox("리스트 값")
+        self.vbox_dynamic_list = QVBoxLayout()
+        self.gb_dynamic_list.setLayout(self.vbox_dynamic_list)
+        self.vbox.addWidget(self.gb_dynamic_list)
+
+    def copy_to_clipboard(self, text):
+        """ 클립보드에 텍스트 복사 """
+        clipboard = QApplication.clipboard()
+        clipboard.setText(text)
+        print(f"클립보드에 복사됨: {text}")
+
+    def update_dynamic_list(self, key_list):
+        """ 동적으로 GUI에 리스트 값 추가 및 복사 버튼 생성 """
+        # 기존에 추가된 위젯 제거
+        for i in reversed(range(self.vbox_dynamic_list.count())):
+            widget = self.vbox_dynamic_list.itemAt(i).widget()
+            if widget:
+                widget.deleteLater()
+
+        # 리스트 값을 추가
+        for item in key_list:
+            hbox = QHBoxLayout()
+            lbl_value = QLabel(item)
+            btn_copy = QPushButton("복사")
+            btn_copy.clicked.connect(lambda checked, text=item: self.copy_to_clipboard(text))
+
+            hbox.addWidget(lbl_value)
+            hbox.addWidget(btn_copy)
+            self.vbox_dynamic_list.addLayout(hbox)
+
     def fetch_goods_detail(self):
         ticket_id = self.le_ticket_id.text().replace(' ', '')
         if ticket_id == '':
@@ -479,14 +543,6 @@ class Form(QWidget):
         inter_pw = self.le_pw.text().replace(' ', '')
         inter_ticket_id = self.le_ticket_id.text().replace(' ', '')
 
-        if inter_id == '':
-            QMessageBox.warning(self, '경고', '아이디를 입력해주세요.')
-            return
-
-        if inter_pw == '':
-            QMessageBox.warning(self, '경고', '비밀번호를 입력해주세요.')
-            return
-
         if inter_ticket_id == '':
             QMessageBox.warning(self, '경고', '공연 ID를 입력해주세요.')
             return
@@ -501,11 +557,12 @@ class Form(QWidget):
             QMessageBox.warning(self, '경고', '공연 정보를 불러와주세요.')
             return
 
-        playSeq = "100001" # Todo: 공연이 열리기전에는 알수 없으므로 제일 첫번째 공연을 예매한다
+        playSeq = SCHEDULE_NO#"100057" # Todo: 공연이 열리기전에는 알수 없으므로 제일 첫번째 공연을 예매한다
 
         self.worker = Worker(self, inter_id, inter_pw, inter_ticket_id, playSeq)
         self.worker.printLog.connect(self.printLog)
         self.worker.taskDone.connect(self.taskDone)
+        self.worker.update_signal.connect(self.update_dynamic_list)
         self.worker.start()
 
         self.btn_start.setEnabled(False)
