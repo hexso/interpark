@@ -50,6 +50,7 @@ class Worker(QThread): # 브라우저 돌아가는 스레드
         self.nflActId = None
         self.real_key = None
         self.session = None
+        self.lock = threading.Lock()
 
     # 1. 아마 아이디마다 고유의 멤버키가 있을것으로 예상된다. 이것을 먼저 받아야 한다.
     def get_memberkey(self):
@@ -169,7 +170,8 @@ class Worker(QThread): # 브라우저 돌아가는 스레드
 
         # 현재 시간 불러오기
         now = datetime.datetime.now()
-
+        target_time = datetime.datetime(now.year, now.month, now.day, target_time.hour, target_time.minute,
+                          target_time.second)
         self.printLog.emit("예약 시작 시간까지 대기합니다..")
 
         # 예약 시작 시간 5초 전까지 대기
@@ -193,7 +195,7 @@ class Worker(QThread): # 브라우저 돌아가는 스레드
 
         #응답시간을 체크하여 최적화된 시간을 계산한다.
         #이 때는 표준편차를 이용
-        def get_optimizatized_time():
+        def get_optimizatized_time(target_time):
             adjustment_factor = 1.1  # 변동성 보정을 위한 계수
             latency_samples = []  # 응답 시간(ms) 저장 리스트
             while datetime.datetime.now() < target_time - datetime.timedelta(milliseconds=START_TIME_MILLI):
@@ -210,35 +212,49 @@ class Worker(QThread): # 브라우저 돌아가는 스레드
 
         # 얻어낸 최적화된 응답시간을 바탕으로 총 REQUESTS_CNT 만큼의 요청을 할 예정.
         # 이것을 가우시안 분포를 통해서 몇 초 전부터 응답을 보낼지 값을 만들어 낸다.
-        optimized_time = get_optimizatized_time()
+        optimized_time = get_optimizatized_time(target_time)
         np.random.seed(42)  # 재현성을 위해 시드 설정
         time_offsets = np.random.normal(loc=0, scale=optimized_time / 2, size=REQUESTS_CNT)
         optimized_time_offsets = optimized_time + time_offsets
         optimized_time_offsets[::-1].sort()
 
         real_key_list = []
-        def get_key(time_offset):
+        def get_key(target_time, time_offset):
             '''
             time_offset: 목표시간 대비
             :return:
             '''
             print("in Thread")
-            target_time = datetime.datetime.now().replace(hour=15, minute=0, second=0, microsecond=0)
             send_time = target_time - datetime.timedelta(milliseconds=time_offset)
-
+            thread_response = None
             while datetime.datetime.now() < send_time:
                 time.sleep(0.001)
-            thread_response = self.get_temp_keys()
-            thread_response = thread_response.json()
-            if 'key' in thread_response:
-                if thread_response['key'] != '':
-                    nflActId = thread_response['nflActId']
-                    response = self.get_real_key(nflActId)
+            with self.lock:
+                if self.nflActId == None:
+                    thread_response = self.get_temp_keys()
+                    thread_response = thread_response.json()
+                    if 'key' in thread_response:
+                        if thread_response['key'] != '':
+                            self.nflActId = thread_response['nflActId']
+                            print(f'nflActId를 획득했습니다. 값 {self.nflActId}')
+                            response = self.get_real_key(self.nflActId)
+                            response_script = response.text
+                            real_key_list.append(response_script)
+                            return
+
+            with self.lock:
+                if self.nflActId != None:
+                    print('이미 key가 있습니다. 바로 real key를 받습니다.')
+                    response = self.get_real_key(self.nflActId)
                     response_script = response.text
                     real_key_list.append(response_script)
+                    return
+
+
 
         for time_offset in optimized_time_offsets:
-            thread = threading.Thread(target=get_key, args=time_offset)
+            print(f"target time : {target_time}")
+            thread = threading.Thread(target=get_key, args=(target_time, time_offset,))
             thread.start()
             self.printLog.emit(f'{time_offset}의 스레드가 실행되었습니다.')
             self.threads.append(thread)
@@ -254,8 +270,7 @@ class Worker(QThread): # 브라우저 돌아가는 스레드
             print(key)
 
         self.printLog.emit('수행을 완료하였습니다.')
-
-        self.up
+        self.update_signal.emit(real_key_list)
 
 
 
